@@ -4,7 +4,7 @@ import plotly.express as px
 import io
 
 # 1. 頁面配置
-st.set_page_config(page_title="批次時間序列分析工具", layout="wide")
+st.set_page_config(page_title="通量系統資料分析工具", layout="wide")
 st.title("📈 通量系統資料分析工具")
 st.caption("支援一次上傳整月檔案，自動合併日期時間、識別並標示物理單位，繪製長期趨勢圖。")
 
