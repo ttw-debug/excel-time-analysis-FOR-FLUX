@@ -7,11 +7,16 @@ import io
 # 1. 頁面配置
 st.set_page_config(page_title="通量系統資料分析", layout="wide")
 st.title("📈 通量系統資料分析")
-st.caption("支援一次上傳整月通量數據檔案，自動合併日期時間、識別物理單位、繪製長期趨勢圖與 ET 每日累積儀表板。")
+st.caption("支援一次上傳整月通量數據檔案，自動合併日期時間、識別物理單位，提供時序圖、ET 蒸散量與降雨量每日累積儀表板。")
 
 # 內建常見通量與環境監測參數標準單位對照表
 DEFAULT_UNITS = {
     "et": "mm",
+    "precip": "mm",
+    "precipitation": "mm",
+    "rain": "mm",
+    "p_rain": "mm",
+    "rain_tot": "mm",
     "co2_mole_fraction": "µmol/mol (ppm)",
     "h2o_mole_fraction": "mmol/mol",
     "ch4_mole_fraction": "µmol/mol",
@@ -121,7 +126,12 @@ if uploaded_files:
             u = unit_map.get(col_name, "")
             return f"{col_name} [{u}]" if u else col_name
 
-        tab_timeseries, tab_et_dashboard = st.tabs(["📈 通量時間序列趨勢", "💧 ET 每日累積儀表板"])
+        # 三大獨立分頁
+        tab_timeseries, tab_et_dashboard, tab_rain_dashboard = st.tabs([
+            "📈 通量時間序列趨勢",
+            "💧 ET 每日累積儀表板",
+            "🌧️ 降雨量每日累積儀表板"
+        ])
 
         # ------------------- TAB 1: 時間序列分析 -------------------
         with tab_timeseries:
@@ -226,7 +236,6 @@ if uploaded_files:
 
             if et_time_col and et_col:
                 df_et = raw_df.copy()
-                
                 s_time = df_et[et_time_col].iloc[:, 0] if isinstance(df_et[et_time_col], pd.DataFrame) else df_et[et_time_col]
                 s_val = df_et[et_col].iloc[:, 0] if isinstance(df_et[et_col], pd.DataFrame) else df_et[et_col]
 
@@ -243,7 +252,6 @@ if uploaded_files:
                 else:
                     df_et['date_str'] = df_et['clean_time'].dt.strftime('%Y-%m-%d')
 
-                    # 依日期加總統計
                     daily_et_df = df_et.groupby('date_str', as_index=False).agg(
                         daily_accum_et=('clean_val', 'sum'),
                         valid_records=('clean_val', 'count'),
@@ -267,7 +275,7 @@ if uploaded_files:
                     st.write("")
                     st.divider()
 
-                    # 2. 圖表一：每日累積蒸散量柱狀圖（使用 bargap 控制寬度，確保穩定呈現）
+                    # 2. 圖表一：每日累積蒸散量柱狀圖
                     st.markdown("#### 📊 每日累積蒸散量 (Daily ET)")
                     fig_bar = px.bar(
                         daily_et_df,
@@ -286,7 +294,7 @@ if uploaded_files:
                     )
                     max_y_bar = daily_et_df['daily_accum_et'].max() * 1.25
                     fig_bar.update_layout(
-                        bargap=0.45,  # 柱間間隔設為 45%，柱子本身佔 55%，纖細乾淨
+                        bargap=0.45,
                         xaxis=dict(type='category', title="日期"),
                         yaxis=dict(title="每日累積 ET (mm/day)", range=[0, max_y_bar if max_y_bar > 0 else 5]),
                         height=420,
@@ -294,7 +302,7 @@ if uploaded_files:
                     )
                     st.plotly_chart(fig_bar, use_container_width=True)
 
-                    # 3. 圖表二：整月累積走勢圖（獨立分開的橘色面積曲線）
+                    # 3. 圖表二：整月累積走勢圖
                     st.markdown("#### 📈 整月累積蒸散量上升走勢 (Cumulative ET)")
                     fig_line = px.line(
                         daily_et_df,
@@ -335,5 +343,138 @@ if uploaded_files:
                         label="📥 下載「每日累積 ET 摘要報表 (CSV)」",
                         data=et_csv_buffer.getvalue(),
                         file_name=f"daily_ET_summary_{daily_et_df['date_str'].iloc[0]}_to_{daily_et_df['date_str'].iloc[-1]}.csv",
+                        mime="text/csv"
+                    )
+
+        # ------------------- TAB 3: 降雨量每日累積儀表板 -------------------
+        with tab_rain_dashboard:
+            st.markdown("### 🌧️ 降雨量 (Precipitation / Rain) 累積統計儀表板")
+            
+            # 自動搜尋降雨候選欄位
+            rain_candidates = [c for c in columns if any(k in c.lower() for k in ['precip', 'rain', 'p_rain', 'rainfall'])]
+            default_rain_index = columns.index(rain_candidates[0]) if rain_candidates else 0
+
+            col_rain_time, col_rain_target = st.columns(2)
+            with col_rain_time:
+                rain_time_col = st.selectbox("選擇【時間 / 日期】基準欄位：", columns, index=0, key="rain_time")
+            with col_rain_target:
+                rain_col = st.selectbox(
+                    "選擇【降雨量 (Rain/Precip)】欄位：",
+                    columns,
+                    index=default_rain_index,
+                    format_func=format_col_with_unit,
+                    key="rain_col_select"
+                )
+
+            if rain_time_col and rain_col:
+                df_rain = raw_df.copy()
+                s_rain_time = df_rain[rain_time_col].iloc[:, 0] if isinstance(df_rain[rain_time_col], pd.DataFrame) else df_rain[rain_time_col]
+                s_rain_val = df_rain[rain_col].iloc[:, 0] if isinstance(df_rain[rain_col], pd.DataFrame) else df_rain[rain_col]
+
+                df_rain['clean_time'] = pd.to_datetime(s_rain_time, errors='coerce')
+                df_rain['clean_val'] = pd.to_numeric(s_rain_val, errors='coerce')
+
+                # 清理無效值，降雨小於 0 歸零
+                df_rain = df_rain.dropna(subset=['clean_time', 'clean_val'])
+                df_rain = df_rain.loc[df_rain['clean_val'] > -9990]
+                df_rain.loc[df_rain['clean_val'] < 0, 'clean_val'] = 0.0
+
+                if df_rain.empty:
+                    st.warning("⚠️ 所選降雨量欄位無有效數值，請確認欄位格式。")
+                else:
+                    df_rain['date_str'] = df_rain['clean_time'].dt.strftime('%Y-%m-%d')
+
+                    # 依日期加總累積降雨
+                    daily_rain_df = df_rain.groupby('date_str', as_index=False).agg(
+                        daily_accum_rain=('clean_val', 'sum'),
+                        valid_records=('clean_val', 'count'),
+                        max_rate=('clean_val', 'max')
+                    ).sort_values(by='date_str')
+
+                    daily_rain_df['cum_monthly_rain'] = daily_rain_df['daily_accum_rain'].cumsum()
+
+                    # 1. 降雨關鍵指標卡片 (Metrics)
+                    total_monthly_rain = daily_rain_df['daily_accum_rain'].sum()
+                    rain_days_count = len(daily_rain_df[daily_rain_df['daily_accum_rain'] >= 0.1])
+                    total_obs_days = len(daily_rain_df)
+                    max_rain_day_row = daily_rain_df.loc[daily_rain_df['daily_accum_rain'].idxmax()]
+
+                    r1, r2, r3, r4 = st.columns(4)
+                    r1.metric("🗓️ 觀測天數", f"{total_obs_days} 天")
+                    r2.metric("🌧️ 整月總降雨量", f"{total_monthly_rain:.2f} mm")
+                    r3.metric("☔ 降雨日數 (≥0.1mm)", f"{rain_days_count} 天", f"佔比 {(rain_days_count/total_obs_days)*100:.1f}%")
+                    r4.metric("🌊 單日最大降雨", f"{max_rain_day_row['daily_accum_rain']:.2f} mm", f"日期: {max_rain_day_row['date_str']}")
+
+                    st.write("")
+                    st.divider()
+
+                    # 2. 圖表一：每日累積降雨量柱狀圖（經典深藍）
+                    st.markdown("#### 📊 每日累積降雨量 (Daily Precipitation)")
+                    fig_rain_bar = px.bar(
+                        daily_rain_df,
+                        x='date_str',
+                        y='daily_accum_rain',
+                        text=daily_rain_df['daily_accum_rain'].apply(lambda v: f"{v:.2f}"),
+                        title=f"每日累積降雨量 ({daily_rain_df['date_str'].iloc[0]} ~ {daily_rain_df['date_str'].iloc[-1]})",
+                        labels={'date_str': '日期', 'daily_accum_rain': '當日累積降雨 (mm/day)'}
+                    )
+                    fig_rain_bar.update_traces(
+                        marker_color='#1565C0',
+                        marker_line_color='#0D47A1',
+                        marker_line_width=1.5,
+                        textposition='outside',
+                        hovertemplate="<b>日期</b>: %{x}<br><b>當日降雨</b>: %{y:.2f} mm<extra></extra>"
+                    )
+                    max_y_rain = daily_rain_df['daily_accum_rain'].max() * 1.25
+                    fig_rain_bar.update_layout(
+                        bargap=0.45,
+                        xaxis=dict(type='category', title="日期"),
+                        yaxis=dict(title="每日降雨量 (mm/day)", range=[0, max_y_rain if max_y_rain > 0 else 10]),
+                        height=420,
+                        margin=dict(l=40, r=40, t=30, b=40)
+                    )
+                    st.plotly_chart(fig_rain_bar, use_container_width=True)
+
+                    # 3. 圖表二：整月累積降雨上升走勢圖（靛藍曲線）
+                    st.markdown("#### 📈 整月累積降雨量走勢 (Cumulative Precipitation)")
+                    fig_rain_line = px.line(
+                        daily_rain_df,
+                        x='date_str',
+                        y='cum_monthly_rain',
+                        markers=True,
+                        title=f"整月累積降雨量走勢 ({daily_rain_df['date_str'].iloc[0]} ~ {daily_rain_df['date_str'].iloc[-1]})",
+                        labels={'date_str': '日期', 'cum_monthly_rain': '整月累計總量 (mm)'}
+                    )
+                    fig_rain_line.update_traces(
+                        line_color='#0288D1',
+                        line_width=3,
+                        marker=dict(size=8, color='#0288D1', line=dict(width=1.5, color='#ffffff')),
+                        hovertemplate="<b>日期</b>: %{x}<br><b>整月累計雨量</b>: %{y:.2f} mm<extra></extra>"
+                    )
+                    fig_rain_line.update_layout(
+                        xaxis=dict(type='category', title="日期"),
+                        yaxis=dict(title="整月累計降雨量 (mm)"),
+                        height=380,
+                        margin=dict(l=40, r=40, t=30, b=40)
+                    )
+                    st.plotly_chart(fig_rain_line, use_container_width=True)
+
+                    # 4. 每日統計數據列表與下載
+                    with st.expander("📋 檢視每日降雨量數值清單"):
+                        display_rain_df = daily_rain_df.rename(columns={
+                            'date_str': '日期',
+                            'daily_accum_rain': '當日累積降雨量 (mm)',
+                            'cum_monthly_rain': '累計總量 (mm)',
+                            'valid_records': '當日有效記錄點數',
+                            'max_rate': '單日瞬時最大值'
+                        })[['日期', '當日累積降雨量 (mm)', '累計總量 (mm)', '當日有效記錄點數', '單日瞬時最大值']]
+                        st.dataframe(display_rain_df, use_container_width=True)
+
+                    rain_csv_buffer = io.BytesIO()
+                    display_rain_df.to_csv(rain_csv_buffer, index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 下載「每日降雨量摘要報表 (CSV)」",
+                        data=rain_csv_buffer.getvalue(),
+                        file_name=f"daily_Rain_summary_{daily_rain_df['date_str'].iloc[0]}_to_{daily_rain_df['date_str'].iloc[-1]}.csv",
                         mime="text/csv"
                     )
