@@ -121,7 +121,6 @@ if uploaded_files:
             u = unit_map.get(col_name, "")
             return f"{col_name} [{u}]" if u else col_name
 
-        # 使用分頁切換「時序趨勢分析」與「ET 累積儀表板」
         tab_timeseries, tab_et_dashboard = st.tabs(["📈 通量時間序列趨勢", "💧 ET 每日累積儀表板"])
 
         # ------------------- TAB 1: 時間序列分析 -------------------
@@ -210,8 +209,7 @@ if uploaded_files:
         with tab_et_dashboard:
             st.markdown("### 💧 蒸散量 (Evapotranspiration, ET) 累積統計儀表板")
             
-            # 尋找候選 ET 欄位
-            et_candidates = [c for c in columns if 'et' in c.lower() or 'evapo' in c.lower()]
+            et_candidates = [c for c in columns if any(k in c.lower() for k in ['et', 'evapo'])]
             default_et_index = columns.index(et_candidates[0]) if et_candidates else 0
 
             col_et_time, col_et_target = st.columns(2)
@@ -228,34 +226,37 @@ if uploaded_files:
 
             if et_time_col and et_col:
                 df_et = raw_df.copy()
-                df_et[et_time_col] = pd.to_datetime(df_et[et_time_col], errors='coerce')
-                df_et[et_col] = pd.to_numeric(df_et[et_col], errors='coerce')
                 
-                # 清除無效值
-                df_et.loc[df_et[et_col] <= -9990, et_col] = pd.NA
-                # 排除小於 0 的物理不合理微小負值（露水或雜訊，可根據需求保留或歸零）
-                df_et.loc[df_et[et_col] < 0, et_col] = 0.0
+                # 防呆：確保提取出來的是單一 Series
+                s_time = df_et[et_time_col].iloc[:, 0] if isinstance(df_et[et_time_col], pd.DataFrame) else df_et[et_time_col]
+                s_val = df_et[et_col].iloc[:, 0] if isinstance(df_et[et_col], pd.DataFrame) else df_et[et_col]
 
-                df_et = df_et.dropna(subset=[et_time_col, et_col])
-                df_et = df_et.sort_values(by=et_time_col).drop_duplicates(subset=[et_time_col], keep='last')
+                # 建立清洗後的新欄位
+                df_et['clean_time'] = pd.to_datetime(s_time, errors='coerce')
+                df_et['clean_val'] = pd.to_numeric(s_val, errors='coerce')
+
+                # 排除時間或數值異常、-9990 以下無效值
+                df_et = df_et.dropna(subset=['clean_time', 'clean_val'])
+                df_et = df_et.loc[df_et['clean_val'] > -9990]
+                # 排除小於 0 的微小負值雜訊（歸零）
+                df_et.loc[df_et['clean_val'] < 0, 'clean_val'] = 0.0
 
                 if df_et.empty:
-                    st.warning("⚠️ 所選 ET 欄位無有效數值。")
+                    st.warning("⚠️ 所選 ET 欄位無有效數值，請確認欄位格式。")
                 else:
-                    # 依日期提取日期字串 (yyyy-mm-dd)
-                    df_et['date_only'] = df_et[et_time_col].dt.date
+                    # 擷取標準日期字串 (YYYY-MM-DD)
+                    df_et['date_str'] = df_et['clean_time'].dt.strftime('%Y-%m-%d')
 
-                    # 按「天」計算累積 ET 與資料完整度
-                    daily_et_df = df_et.groupby('date_only').agg(
-                        daily_accum_et=(et_col, 'sum'),
-                        valid_records=(et_col, 'count'),
-                        max_rate=(et_col, 'max')
-                    ).reset_index()
+                    # 依日期群組統計每日累積與紀錄點數
+                    daily_et_df = df_et.groupby('date_str', as_index=False).agg(
+                        daily_accum_et=('clean_val', 'sum'),
+                        valid_records=('clean_val', 'count'),
+                        max_rate=('clean_val', 'max')
+                    ).sort_values(by='date_str')
 
-                    daily_et_df['date_str'] = daily_et_df['date_only'].astype(str)
                     daily_et_df['cum_monthly_et'] = daily_et_df['daily_accum_et'].cumsum()
 
-                    # 1. 頂部關鍵指標卡片 (Metrics)
+                    # 1. 頂部 KPI 卡片
                     total_monthly_et = daily_et_df['daily_accum_et'].sum()
                     days_count = len(daily_et_df)
                     avg_daily_et = total_monthly_et / days_count if days_count > 0 else 0
@@ -268,65 +269,23 @@ if uploaded_files:
                     m4.metric("🔥 單日最大 ET", f"{max_day_row['daily_accum_et']:.2f} mm", f"日期: {max_day_row['date_str']}")
 
                     st.write("")
+                    st.divider()
 
-                    # 2. 每日累積 ET 柱狀圖 + 累積上升曲線 (雙軸綜合圖)
-                    fig_et = go.Figure()
-
-                    # 柱狀圖：每日累積 ET
-                    fig_et.add_trace(go.Bar(
+                    # 2. 圖表一：每日累積蒸散量柱狀圖（調整柱寬，乾淨適中）
+                    st.markdown("#### 📊 每日累積蒸散量 (Daily ET)")
+                    fig_bar = go.Figure()
+                    fig_bar.add_trace(go.Bar(
                         x=daily_et_df['date_str'],
                         y=daily_et_df['daily_accum_et'],
                         name="每日累積 ET (mm/day)",
-                        marker_color='#2ca02c',
-                        text=daily_et_df['daily_accum_et'].apply(lambda v: f"{v:.1f}"),
-                        textposition='outside'
-                    ))
-
-                    # 折線圖：月累加趨勢線 (次 Y 軸)
-                    fig_et.add_trace(go.Scatter(
-                        x=daily_et_df['date_str'],
-                        y=daily_et_df['cum_monthly_et'],
-                        name="整月累積總量 (Cumulative mm)",
-                        mode='lines+markers',
-                        marker=dict(color='#ff7f0e', size=6),
-                        line=dict(color='#ff7f0e', width=2.5),
-                        yaxis='y2'
-                    ))
-
-                    fig_et.update_layout(
-                        title=f"💧 每日累積蒸散量與整月累計趨勢圖 ({daily_et_df['date_str'].iloc[0]} ~ {daily_et_df['date_str'].iloc[-1]})",
-                        xaxis_title="日期",
-                        yaxis=dict(title="每日累積 ET (mm/day)"),
-                        yaxis2=dict(
-                            title="整月累計總量 (mm)",
-                            overlaying='y',
-                            side='right',
-                            showgrid=False
+                        marker=dict(
+                            color='#2E7D32',
+                            line=dict(color='#1B5E20', width=1.2)
                         ),
-                        legend=dict(x=0.01, y=0.98),
-                        hovermode="x unified",
-                        height=520
-                    )
+                        width=0.45,  # 固定柱寬比例，維持纖細適中
+                        text=daily_et_df['daily_accum_et'].apply(lambda v: f"{v:.2f}"),
+                        textposition='outside',
+                        hovertemplate="<b>日期</b>: %{x}<br><b>當日累積</b>: %{y:.2f} mm<extra></extra>"
+                    ))
 
-                    st.plotly_chart(fig_et, use_container_width=True)
-
-                    # 3. 每日統計數據列表與下載
-                    with st.expander("📋 檢視每日累積數值清單"):
-                        display_df = daily_et_df.rename(columns={
-                            'date_str': '日期',
-                            'daily_accum_et': '當日累積蒸散量 (mm)',
-                            'cum_monthly_et': '累計總量 (mm)',
-                            'valid_records': '當日有效記錄點數 (滿額為 48 點)',
-                            'max_rate': '單日瞬時最大值'
-                        })[['日期', '當日累積蒸散量 (mm)', '累計總量 (mm)', '當日有效記錄點數 (滿額為 48 點)', '單日瞬時最大值']]
-                        st.dataframe(display_df, use_container_width=True)
-
-                    # 提供每日累積摘要報表下載
-                    et_csv_buffer = io.BytesIO()
-                    display_df.to_csv(et_csv_buffer, index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="📥 下載「每日累積 ET 摘要報表 (CSV)」",
-                        data=et_csv_buffer.getvalue(),
-                        file_name=f"daily_ET_summary_{daily_et_df['date_str'].iloc[0]}_{daily_et_df['date_str'].iloc[-1]}.csv",
-                        mime="text/csv"
-                    )
+                    max_y_bar = daily_et_df['daily_accum_et'].max() * 1
