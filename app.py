@@ -227,27 +227,23 @@ if uploaded_files:
             if et_time_col and et_col:
                 df_et = raw_df.copy()
                 
-                # 防呆：確保提取出來的是單一 Series
                 s_time = df_et[et_time_col].iloc[:, 0] if isinstance(df_et[et_time_col], pd.DataFrame) else df_et[et_time_col]
                 s_val = df_et[et_col].iloc[:, 0] if isinstance(df_et[et_col], pd.DataFrame) else df_et[et_col]
 
-                # 建立清洗後的新欄位
                 df_et['clean_time'] = pd.to_datetime(s_time, errors='coerce')
                 df_et['clean_val'] = pd.to_numeric(s_val, errors='coerce')
 
-                # 排除時間或數值異常、-9990 以下無效值
+                # 排除無效值與微小負值雜訊
                 df_et = df_et.dropna(subset=['clean_time', 'clean_val'])
                 df_et = df_et.loc[df_et['clean_val'] > -9990]
-                # 排除小於 0 的微小負值雜訊（歸零）
                 df_et.loc[df_et['clean_val'] < 0, 'clean_val'] = 0.0
 
                 if df_et.empty:
                     st.warning("⚠️ 所選 ET 欄位無有效數值，請確認欄位格式。")
                 else:
-                    # 擷取標準日期字串 (YYYY-MM-DD)
                     df_et['date_str'] = df_et['clean_time'].dt.strftime('%Y-%m-%d')
 
-                    # 依日期群組統計每日累積與紀錄點數
+                    # 依日期加總統計
                     daily_et_df = df_et.groupby('date_str', as_index=False).agg(
                         daily_accum_et=('clean_val', 'sum'),
                         valid_records=('clean_val', 'count'),
@@ -271,21 +267,73 @@ if uploaded_files:
                     st.write("")
                     st.divider()
 
-                    # 2. 圖表一：每日累積蒸散量柱狀圖（調整柱寬，乾淨適中）
+                    # 2. 圖表一：每日累積蒸散量柱狀圖（使用 bargap 控制寬度，確保穩定呈現）
                     st.markdown("#### 📊 每日累積蒸散量 (Daily ET)")
-                    fig_bar = go.Figure()
-                    fig_bar.add_trace(go.Bar(
-                        x=daily_et_df['date_str'],
-                        y=daily_et_df['daily_accum_et'],
-                        name="每日累積 ET (mm/day)",
-                        marker=dict(
-                            color='#2E7D32',
-                            line=dict(color='#1B5E20', width=1.2)
-                        ),
-                        width=0.45,  # 固定柱寬比例，維持纖細適中
+                    fig_bar = px.bar(
+                        daily_et_df,
+                        x='date_str',
+                        y='daily_accum_et',
                         text=daily_et_df['daily_accum_et'].apply(lambda v: f"{v:.2f}"),
+                        title=f"每日累積蒸散量 ({daily_et_df['date_str'].iloc[0]} ~ {daily_et_df['date_str'].iloc[-1]})",
+                        labels={'date_str': '日期', 'daily_accum_et': '當日累積 ET (mm/day)'}
+                    )
+                    fig_bar.update_traces(
+                        marker_color='#2E7D32',
+                        marker_line_color='#1B5E20',
+                        marker_line_width=1.5,
                         textposition='outside',
-                        hovertemplate="<b>日期</b>: %{x}<br><b>當日累積</b>: %{y:.2f} mm<extra></extra>"
-                    ))
+                        hovertemplate="<b>日期</b>: %{x}<br><b>當日累積 ET</b>: %{y:.2f} mm<extra></extra>"
+                    )
+                    max_y_bar = daily_et_df['daily_accum_et'].max() * 1.25
+                    fig_bar.update_layout(
+                        bargap=0.45,  # 柱間間隔設為 45%，柱子本身佔 55%，纖細乾淨
+                        xaxis=dict(type='category', title="日期"),
+                        yaxis=dict(title="每日累積 ET (mm/day)", range=[0, max_y_bar if max_y_bar > 0 else 5]),
+                        height=420,
+                        margin=dict(l=40, r=40, t=30, b=40)
+                    )
+                    st.plotly_chart(fig_bar, use_container_width=True)
 
-                    max_y_bar = daily_et_df['daily_accum_et'].max() * 1
+                    # 3. 圖表二：整月累積走勢圖（獨立分開的橘色面積曲線）
+                    st.markdown("#### 📈 整月累積蒸散量上升走勢 (Cumulative ET)")
+                    fig_line = px.line(
+                        daily_et_df,
+                        x='date_str',
+                        y='cum_monthly_et',
+                        markers=True,
+                        title=f"整月累積蒸散量上升走勢 ({daily_et_df['date_str'].iloc[0]} ~ {daily_et_df['date_str'].iloc[-1]})",
+                        labels={'date_str': '日期', 'cum_monthly_et': '整月累計總量 (mm)'}
+                    )
+                    fig_line.update_traces(
+                        line_color='#FF6F00',
+                        line_width=3,
+                        marker=dict(size=8, color='#FF6F00', line=dict(width=1.5, color='#ffffff')),
+                        hovertemplate="<b>日期</b>: %{x}<br><b>整月累計 ET</b>: %{y:.2f} mm<extra></extra>"
+                    )
+                    fig_line.update_layout(
+                        xaxis=dict(type='category', title="日期"),
+                        yaxis=dict(title="整月累計總量 (mm)"),
+                        height=380,
+                        margin=dict(l=40, r=40, t=30, b=40)
+                    )
+                    st.plotly_chart(fig_line, use_container_width=True)
+
+                    # 4. 每日統計數據列表與下載
+                    with st.expander("📋 檢視每日累積數值清單"):
+                        display_df = daily_et_df.rename(columns={
+                            'date_str': '日期',
+                            'daily_accum_et': '當日累積蒸散量 (mm)',
+                            'cum_monthly_et': '累計總量 (mm)',
+                            'valid_records': '當日有效記錄點數 (滿額為 48 點)',
+                            'max_rate': '單日瞬時最大值'
+                        })[['日期', '當日累積蒸散量 (mm)', '累計總量 (mm)', '當日有效記錄點數 (滿額為 48 點)', '單日瞬時最大值']]
+                        st.dataframe(display_df, use_container_width=True)
+
+                    et_csv_buffer = io.BytesIO()
+                    display_df.to_csv(et_csv_buffer, index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 下載「每日累積 ET 摘要報表 (CSV)」",
+                        data=et_csv_buffer.getvalue(),
+                        file_name=f"daily_ET_summary_{daily_et_df['date_str'].iloc[0]}_to_{daily_et_df['date_str'].iloc[-1]}.csv",
+                        mime="text/csv"
+                    )
